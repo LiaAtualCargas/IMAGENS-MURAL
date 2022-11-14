@@ -1,0 +1,131 @@
+# API-TELEFONIA
+
+<?php
+  include '../lib/presto.php';
+  include '../lib/ssw.php';
+  include '../lib/cpf_cnpj.php';
+
+  $dominio = strtoupper (trim ($_GET['dominio']));
+  $nro_nf  = strtolower (trim ($_GET['nro_nf']));
+  $cnpj    = strtolower (trim ($_GET['cnpj']));
+
+  function i_msg ($msg, $sit = '', $pre = '', $oco = '', $com = '', $ocd = '', $och = '', $cod = '')
+  {
+    $sts = 1;
+
+    if ($msg == '') $sts = 0;
+
+    $str = xmlHeader() . chr(10) .
+           "<retorno>" . chr(10) .
+           "<status>" . $sts . "</status>" . chr(10) .
+           "<msg_erro>" . $msg . "</msg_erro>" . chr(10) .
+           "<situacao>" . esc($sit) . "</situacao>" . chr(10) .
+           "<prev_ent>" . $pre . "</prev_ent>" . chr(10) .
+           "<ult_ocor>" . $oco . "</ult_ocor>" . chr(10) .
+           "<complemento>" . $com . "</complemento>" . chr(10) .
+           "<data_ult_ocor>" . $ocd . "</data_ult_ocor>" . chr(10) .
+           "<hora_ult_ocor>" . $och . "</hora_ult_ocor>" . chr(10) .
+           "<cod_ocor>" . $cod . "</cod_ocor>" . chr(10) .
+           "</retorno>";
+
+    $xml = new SimpleXMLElement($str);
+    header("Content-type: text/xml; charset=utf-8");
+    echo $xml->asXML();
+    exit;
+  }
+
+  // Verifica o dominio
+  if ($dominio == '')
+    i_msg ('Informe o domínio.');
+
+  // Conecta
+  ssw_login ($dominio);
+if ($cnpj == '')
+    i_msg ('Informe o CNPJ.');
+
+  // verfifica se o CNPJ/CPF E VALIDO
+  if (calcula_cpf_cnpj ($cnpj) == 3)
+    i_msg ("CNPJ/CPF INFORMADO ERRADO");
+
+  // Verifica se o cliente está cadastrado no SSW
+  $str = ssw_go ("https://sistema.ssw.inf.br/bin/ssw0054?act=E&cnpj_cliente=$cnpj&login_resp=lia&tipo=cliente&automatico=S&programa=ssw0054&fld=1");
+  $seq_cliente = (int) get_var ($str, 'seq_cliente');
+
+  if ($seq_cliente == 0)
+    i_msg ("CNPJ/CPF NÃO LOCALIZADO EM NOSSO SISTEMA");
+
+  // Verifica a NF, jah com o CNPJ do cliente (caso tenha vindo)
+  if ($nro_nf == '')
+    i_msg ('Informe o número da Nota Fiscal.');
+
+  // Pesquisa o CT-e por nota na 101, com periodo de um mes para tras
+  $param = "act=P2&t_nro_nf=$nro_nf&t_data_ini=" . date ('dmy', strtotime ('-1 month')) . "&t_data_fin=" . date ('dmy');
+  $str = ssw_go ("https://sistema.ssw.inf.br/bin/ssw0053?$param");
+
+  if (strpos ($str, 'Nenhum CTRC selecionado para dados e per&iacute;odo informados') !== false)
+    i_msg ("Desculpe! Não encontramos nenhuma NF para rastreamento com os parâmetros informados. Favor entrar em contato.");
+
+  $found = false;
+
+  // Se veio a lista...
+  if (strpos ($str, 'xmlsr') !== false)
+  {
+    $str = substr ($str, strpos($str,'<xml'), strlen($str));
+    $str = substr ($str, 0, strpos($str,'</xml>')) . '</xml>';
+    $xml = simplexml_load_string($str);
+    $count = count ($xml->xpath('rs/r'));
+
+    for ($i = 0; $i < count ($xml->xpath('rs/r')); $i++)
+    {
+      $sts = $xml->xpath('rs/r/f12')[$i]; // Status
+      $act = $xml->xpath('rs/r/f13')[$i]; // Acao da lista, contendo o seq_ctrc
+
+      if (strpos ($sts, 'Cancelado') !== false) // Destonsidera cancelados
+        continue;
+
+      $seq_ctrc = explode ('@', $act)[2];
+
+      // Abre cada CT-e, e verifica se eh do cliente
+      $str = ssw_go ("https://sistema.ssw.inf.br/bin/ssw0053?act=$act");
+
+      if (strpos ($str, $cnpj) !== false)
+      {
+        $found = true;
+        break;
+      }
+    }
+  }
+  else
+  {
+    $seq_ctrc = get_var ($str, 'seq_ctrc');
+    $found = true;
+  }
+
+  if (!$found)
+    i_msg ("Desculpe! Não encontramos nenhuma NF para rastreamento com os parâmetros informados. Favor entrar em contato.");
+
+  // Vamos ateh a tela de ocorrencias do CT-e, para buscar informacoes
+  $str = ssw_go ("https://sistema.ssw.inf.br/bin/ssw0053?act=O&seq_ctrc=$seq_ctrc&FAMILIA=$dominio");
+  $sit = get_label ($str, 'Localiza&ccedil;&atilde;o&nbsp;&nbsp;atual:');
+  $pre = get_label ($str, 'Prazo&nbsp;de&nbsp;entrega:');
+
+  // Haverá uma lista com as ocorrencias, vamos pegar a mais recente
+  $str = substr ($str, strpos($str,'<xml'), strlen($str));
+  $str = substr ($str, 0, strpos($str,'</xml>')) . '</xml>';
+  $xml = simplexml_load_string($str);
+  $count = count ($xml->xpath('rs/r'));
+
+  for ($i = 0; $i < count ($xml->xpath('rs/r')); $i++)
+  {
+    $ocd = $xml->xpath('rs/r/f0')[$i];
+    $oco = $xml->xpath('rs/r/f5')[$i];
+    $com = $xml->xpath('rs/r/f6')[$i];
+    $och = explode (' ', $ocd)[1];
+    $cod = (int) explode (' ', $oco)[0];
+
+    if (!in_array ($cod, array (1, 2, 3, 4,9, 10, 11, 15, 16, 17, 18, 64, 66, 67, 68, 81, 82, 84, 96))) continue;
+
+    if ($oco != '') break;
+  }
+
+  i_msg ('', $sit, $pre, $oco, $com, $ocd, $och, $cod);
